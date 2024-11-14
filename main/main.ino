@@ -174,35 +174,63 @@ unsigned long lastDatapointMillis; // time that the last datapoint was written
 bool firstSample = true;
 int sampleCount = 0;
 long sampleSum = 0;
-const int GLITCH_BUFFER_SIZE = 10;
-int glitchRejectBuffer[GLITCH_BUFFER_SIZE];
+//const int GLITCH_BUFFER_SIZE = 10;
+//int glitchRejectBuffer[GLITCH_BUFFER_SIZE];
+
+const int DEGLITCH_THRESHOLD = 5; // based on typical noise
+
+int samplePrevious;
+int sampleBeingDeglitched;
+int deglitchedSampleCount = 0;
+unsigned long deglitchedSampleSum = 0;
 
 double getFilteredControllerDeviation(unsigned long timeNowMillis, int currentReading) {
   if (firstSample) {
     lastDatapointMillis = timeNowMillis;
     sampleCount = 0;
     sampleSum = 0;
+    deglitchedSampleCount = 0;
+    deglitchedSampleSum = 0;
     firstSample = false;
   }
   if (timeNowMillis - lastDatapointMillis < SAMPLE_PERIOD_MILLIS) {
-    if (sampleCount < GLITCH_BUFFER_SIZE) glitchRejectBuffer[sampleCount] = currentReading;
+//    if (sampleCount < GLITCH_BUFFER_SIZE) glitchRejectBuffer[sampleCount] = currentReading;
     ++sampleCount;
     sampleSum += currentReading;
+    if (sampleCount == 1) {
+      samplePrevious = currentReading;
+    } else if (sampleCount == 2) {
+      sampleBeingDeglitched = currentReading;
+    } else {
+      bool glitchFound = false;
+      if (sampleBeingDeglitched > samplePrevious + DEGLITCH_THRESHOLD && sampleBeingDeglitched > currentReading + DEGLITCH_THRESHOLD) glitchFound = true;
+      if (sampleBeingDeglitched < samplePrevious - DEGLITCH_THRESHOLD && sampleBeingDeglitched < currentReading - DEGLITCH_THRESHOLD) glitchFound = true;
+      if (!glitchFound) {
+        ++deglitchedSampleCount;
+        deglitchedSampleSum += sampleBeingDeglitched;
+      }
+      sampleBeingDeglitched = currentReading;
+    }
   } else {
     unsigned long overshoot = (timeNowMillis - lastDatapointMillis) % SAMPLE_PERIOD_MILLIS;
     lastDatapointMillis = timeNowMillis - overshoot;
     double meanValue = (sampleCount > 0 ? (double)sampleSum / sampleCount : 0);
-    int minval = 10000;
-    int maxval = -1;
-    for (int i=0; i< sampleCount; ++i) {
-      Serial.print(spacecheck[i]); Serial.print(" "); 
-      minval = (minval < spacecheck[i] ? minval : spacecheck[i]);
-      maxval = (maxval > spacecheck[i] ? maxval : spacecheck[i]);
-    }
+    double deglitchedMeanValue = (deglitchedSampleCount > 0 ? (double)deglitchedSampleSum / deglitchedSampleCount : 0);
+//    int minval = 10000;
+//    int maxval = -1;
+//    for (int i=0; i< sampleCount; ++i) {
+//      Serial.print(glitchRejectBuffer[i]); Serial.print(" "); 
+//      minval = (minval < glitchRejectBuffer[i] ? minval : glitchRejectBuffer[i]);
+//      maxval = (maxval > glitchRejectBuffer[i] ? maxval : glitchRejectBuffer[i]);
+//    }
     
-    Serial.print(sampleCount); Serial.print(" "); Serial.print(meanValue); Serial.print(" "); Serial.print(minval); Serial.print(" "); Serial.println(maxval);
+    Serial.print(sampleCount); Serial.print(" "); Serial.print(meanValue); Serial.print(" "); 
+    Serial.print((deglitchedSampleCount == sampleCount - 2) ? "" : "*");
+    Serial.print(deglitchedSampleCount); Serial.print(" "); Serial.println(deglitchedMeanValue);
     sampleCount = 0;
-    sampleSum = 0;    
+    sampleSum = 0;
+    deglitchedSampleCount = 0;    
+    deglitchedSampleSum = 0;
   }
   return (double)CONTROLLER_MAX_VALUE * (double)currentReading / (double)ANALOG_READ_10V;
 }
