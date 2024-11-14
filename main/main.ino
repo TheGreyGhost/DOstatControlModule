@@ -26,7 +26,7 @@
 
 const bool TEST_MODE = false;
 
-const int ANALOG_READ_10V = 865;  // the ANALOG_READ value on pin A2 when the controller signal is 10V
+const int ANALOG_READ_10V = 859;  // the ANALOG_READ value on pin A2 when the controller signal is 10V
 const int TRIMPOT_SENSITIVITY_MAX_VALUE = 20;  // the controller value (%) corresponding to the maximum value of the trimpot (1024 analog read, 10.0 on the dial)
 const int CONTROLLER_MAX_VALUE = 100; // maximum controller value
 
