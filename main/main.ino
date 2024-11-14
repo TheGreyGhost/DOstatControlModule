@@ -15,7 +15,7 @@
  * 
  * Controls are:
  * 1) Red LED = flashes at a speed related to the percent of the threshold.  Slow flash = small percent.  Fast flash = large percent of threshold.  Solid = exceeded threshold
- * 2) Yellow LED = ON when the system is in the 10 minute post-cooldown mode
+ * 2) Yellow LED = ON when the system is in the 10 minute post-cooldown mode.  Flashes when the auto mode is not ready (long term average not collected yet)
  * 3) Green LED = ON when the pump is running
  * 4) Left trimpot = trigger sensitivity
  * 5) Right trimpot = Pump run duration, dial is in minutes
@@ -24,7 +24,7 @@
  * 8) Toggle = Abort cooldown
  */
 
-const bool TEST_MODE = true;
+const bool TEST_MODE = false;
 
 const int ANALOG_READ_10V = 865;  // the ANALOG_READ value on pin A2 when the controller signal is 10V
 const int TRIMPOT_SENSITIVITY_MAX_VALUE = 20;  // the controller value (%) corresponding to the maximum value of the trimpot (1024 analog read, 10.0 on the dial)
@@ -79,12 +79,19 @@ void loop() {
 
   const float SLOWEST_FLASH_SPEED = 0.25; // Hz
   const float FASTEST_FLASH_SPEED = 10; // Hz
+  const float NOT_READY_FLASH_SPEED = 0.5; //Hz
   double controllerDeviationThreshold = (double)TRIMPOT_SENSITIVITY_MAX_VALUE * (double)trimpotSensitivity / 1024;
   double controllerDeviation = getFilteredControllerDeviation(timeNowMillis, controllerSignal);
-  redLEDflashHz = SLOWEST_FLASH_SPEED + (FASTEST_FLASH_SPEED - SLOWEST_FLASH_SPEED) * (controllerDeviation / controllerDeviationThreshold);
+  bool autoControlReady = (controllerDeviation >=0);
+
+  if (autoControlReady) {
+    redLEDflashHz = SLOWEST_FLASH_SPEED + (FASTEST_FLASH_SPEED - SLOWEST_FLASH_SPEED) * (controllerDeviation / controllerDeviationThreshold);
+  } else {
+    redLEDflashHz = NOT_READY_FLASH_SPEED;
+  }
 //  Serial.print(Deviation); Serial.print(" "); Serial.print(controllerSignal); Serial.print(" "); Serial.println(controllerDeviationThreshold);
   if (buttonAutoMode) {
-    if (buttonTriggerDose || controllerDeviation >= controllerDeviationThreshold) {
+    if (buttonTriggerDose || (autoControlReady && controllerDeviation >= controllerDeviationThreshold)) {
       if (!hasTriggeredCooldown) {  
         hasTriggeredPump = true;
         hasTriggeredCooldown = (buttonAbortCooldown ? false : true);
@@ -115,7 +122,6 @@ void loop() {
   }
   digitalWrite(9, runPump ? LOW : HIGH);  // output to pump
   digitalWrite(7, runPump ? HIGH : LOW);  // green LED
-  digitalWrite(3, hasTriggeredCooldown ? HIGH : LOW); // yellow LED
 
   if (redLEDflashHz >= FASTEST_FLASH_SPEED) {
     redLEDon = true;
@@ -132,6 +138,11 @@ void loop() {
     }
   }
   digitalWrite(2, redLEDon ? HIGH : LOW); // red LED
+  if (autoControlReady) {
+    digitalWrite(3, hasTriggeredCooldown ? HIGH : LOW); // yellow LED
+  } else {
+    digitalWrite(3, !redLEDon ? HIGH : LOW); // yellow LED    
+  }
 }
 
 int readControllerSignal() {
@@ -164,10 +175,17 @@ void copystate(int from, int to) {
 // add the currentReading to the filtered sample
 // calculate the deviation of the 30 second moving average from the 5 minute moving average  (-100 - 100 controller units)
 
-const int STORE_BUFFER_SIZE = 60 * 5;  // 5 minutes
-int bufferpos = 0;  // the position of the next location to store a controull
-int buffer[STORE_BUFFER_SIZE];  // buffer to store the controller output values for the recent past
-double bufferAverage;  // the average value of the buffer
+const int BASELINE_BUFFER_SIZE = (TEST_MODE ? 60 : 60 * 5);  // 5 minutes
+int baselineBufferPos = 0;  // the position of the next location to store a controller output
+int baselineBufferCount = 0;  // how many positions in the buffer are used?
+int baselineBuffer[BASELINE_BUFFER_SIZE];  // circular buffer to store the controller output values for the recent past
+unsigned long baselineBufferSum;  // the total sum of values in the buffer
+
+const int SHORT_BUFFER_SIZE = 10;  // 10 seconds
+int shortBufferPos = 0;  // the position of the next location to store a controller output
+int shortBufferCount = 0;  // how many positions in the buffer are used?
+int shortBuffer[SHORT_BUFFER_SIZE];  // circular buffer to store the controller output values for the recent past
+unsigned long shortBufferSum;  // the total sum of values in the buffer
 
 const unsigned long SAMPLE_PERIOD_MILLIS = 1000;
 unsigned long lastDatapointMillis; // time that the last datapoint was written
@@ -184,6 +202,12 @@ int sampleBeingDeglitched;
 int deglitchedSampleCount = 0;
 unsigned long deglitchedSampleSum = 0;
 
+double filteredControllerDeviationLastValue;
+bool filteredControllerDeviationAvailable  = false;
+
+//returns positive value for a deviation
+// if the deviation is less than zero (i.e. the controller output is increasing, not decreasing) then it returns 0
+// if no value is available yet, returns a negative value
 double getFilteredControllerDeviation(unsigned long timeNowMillis, int currentReading) {
   if (firstSample) {
     lastDatapointMillis = timeNowMillis;
@@ -191,6 +215,13 @@ double getFilteredControllerDeviation(unsigned long timeNowMillis, int currentRe
     sampleSum = 0;
     deglitchedSampleCount = 0;
     deglitchedSampleSum = 0;
+    baselineBufferPos = 0;
+    baselineBufferCount = 0;
+    baselineBufferSum = 0;
+    shortBufferPos = 0;
+    shortBufferCount = 0;
+    shortBufferSum = 0;
+    filteredControllerDeviationAvailable = false;
     firstSample = false;
   }
   if (timeNowMillis - lastDatapointMillis < SAMPLE_PERIOD_MILLIS) {
@@ -214,8 +245,8 @@ double getFilteredControllerDeviation(unsigned long timeNowMillis, int currentRe
   } else {
     unsigned long overshoot = (timeNowMillis - lastDatapointMillis) % SAMPLE_PERIOD_MILLIS;
     lastDatapointMillis = timeNowMillis - overshoot;
-    double meanValue = (sampleCount > 0 ? (double)sampleSum / sampleCount : 0);
-    double deglitchedMeanValue = (deglitchedSampleCount > 0 ? (double)deglitchedSampleSum / deglitchedSampleCount : 0);
+    int meanValueTimes16 = (sampleCount > 0 ? (16*sampleSum) / sampleCount : 0);
+    int deglitchedMeanValueTimes16 = (deglitchedSampleCount > 0 ? (16*deglitchedSampleSum) / deglitchedSampleCount : 0);
 //    int minval = 10000;
 //    int maxval = -1;
 //    for (int i=0; i< sampleCount; ++i) {
@@ -224,13 +255,41 @@ double getFilteredControllerDeviation(unsigned long timeNowMillis, int currentRe
 //      maxval = (maxval > glitchRejectBuffer[i] ? maxval : glitchRejectBuffer[i]);
 //    }
     
-    Serial.print(sampleCount); Serial.print(" "); Serial.print(meanValue); Serial.print(" "); 
-    Serial.print((deglitchedSampleCount == sampleCount - 2) ? "" : "*");
-    Serial.print(deglitchedSampleCount); Serial.print(" "); Serial.println(deglitchedMeanValue);
+//    Serial.print(sampleCount); Serial.print(" "); Serial.print(meanValueTimes16); Serial.print(" "); 
+//    Serial.print((deglitchedSampleCount == sampleCount - 2) ? "" : "*");
+//    Serial.print(deglitchedSampleCount); Serial.print(" "); Serial.print(deglitchedMeanValueTimes16);
     sampleCount = 0;
     sampleSum = 0;
     deglitchedSampleCount = 0;    
     deglitchedSampleSum = 0;
+
+    if (shortBufferCount >= SHORT_BUFFER_SIZE) {  // remove old value, insert new value
+      shortBufferSum -= shortBuffer[shortBufferPos];
+    } else {
+      ++shortBufferCount;
+    }
+    shortBufferSum += deglitchedMeanValueTimes16;
+    shortBuffer[shortBufferPos] = deglitchedMeanValueTimes16;
+    if (++shortBufferPos >= SHORT_BUFFER_SIZE) shortBufferPos = 0;
+
+    double shortTermAverage = (double)CONTROLLER_MAX_VALUE * (double)shortBufferSum / SHORT_BUFFER_SIZE / 16.0 / (double)ANALOG_READ_10V;
+ //   Serial.print(" shortave:"); Serial.println(shortTermAverage);
+
+    if (baselineBufferCount >= BASELINE_BUFFER_SIZE) {  // remove old value, insert new value
+      baselineBufferSum -= baselineBuffer[baselineBufferPos];
+    } else {
+      ++baselineBufferCount;
+    }
+    baselineBufferSum += deglitchedMeanValueTimes16;
+    baselineBuffer[baselineBufferPos] = deglitchedMeanValueTimes16;
+    if (++baselineBufferPos >= BASELINE_BUFFER_SIZE) baselineBufferPos = 0;
+
+    double baselineAverage = (double)CONTROLLER_MAX_VALUE * (double)baselineBufferSum / BASELINE_BUFFER_SIZE / 16.0 / (double)ANALOG_READ_10V;
+    filteredControllerDeviationLastValue = baselineAverage - shortTermAverage;
+    if (filteredControllerDeviationLastValue < 0) filteredControllerDeviationLastValue = 0;
+    filteredControllerDeviationAvailable = (baselineBufferCount >= BASELINE_BUFFER_SIZE && shortBufferCount >= SHORT_BUFFER_SIZE);
+    Serial.print(" shortave:"); Serial.print(shortTermAverage); Serial.print(" baseline:"); Serial.print(baselineAverage);
+    Serial.print(" deviation:"); Serial.println(filteredControllerDeviationLastValue);
   }
-  return (double)CONTROLLER_MAX_VALUE * (double)currentReading / (double)ANALOG_READ_10V;
+  return (filteredControllerDeviationAvailable ? filteredControllerDeviationLastValue : -1);
 }
