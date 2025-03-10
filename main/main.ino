@@ -1,3 +1,4 @@
+#include "rpmsensor.h"
 /*
  * Pin assignments:
  * D2 out = Red LED
@@ -34,7 +35,11 @@ void setup() {
   // put your setup code here, to run once:
   //start serial connection
   Serial.begin(9600);
-  //configure pin 2 as an input and enable the internal pull-up resistor
+  rpmSensorSetup();
+  /*
+
+  
+  //configure pin 4 as an input and enable the internal pull-up resistor
   pinMode(4, INPUT_PULLUP);
   pinMode(5, INPUT_PULLUP);
   pinMode(6, INPUT_PULLUP);
@@ -45,6 +50,7 @@ void setup() {
   pinMode(7, OUTPUT);
   pinMode(9, OUTPUT);
   pinMode(13, OUTPUT);
+  */
 }
 
 unsigned long lastSecondMillis;
@@ -57,6 +63,8 @@ unsigned long flashChangeMillis;  // time at which the last RED LED change in st
 bool redLEDon;  // what state is the redLED?
 
 void loop() {
+  testRpmSensorloop();
+  /*
   bool buttonTriggerDose = (digitalRead(10) == LOW ? true : false);
   bool buttonAbortCooldown = (digitalRead(6) == LOW ? true : false);
   bool buttonRunPump = (digitalRead(4) == LOW ? true : false);
@@ -75,6 +83,7 @@ void loop() {
     if (buttonAbortCooldown || (timeNowMillis - triggerMillis >= cooldownDurationMillis)) {
       hasTriggeredCooldown = false;
     }
+
   }
 
   const float SLOWEST_FLASH_SPEED = 0.25; // Hz
@@ -143,6 +152,8 @@ void loop() {
   } else {
     digitalWrite(3, !redLEDon ? HIGH : LOW); // yellow LED    
   }
+
+      */
 }
 
 int readControllerSignal() {
