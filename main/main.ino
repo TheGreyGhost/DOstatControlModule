@@ -1,7 +1,7 @@
 #include "rpmsensor.h"
 /*
  * Pin assignments:
- * D2 out = Red LED
+ * D2 in = rpm sensor pulse input
  * D3 out = Yellow LED
  * D4 in = On/Off/Auto switch left position
  * D5 in = On/Off/Auto switch right position
@@ -9,6 +9,7 @@
  * D7 out = Green LED
  * D9 out = Pump On/Off
  * D10 in = push button
+ * D11 out = Red LED
  * 
  * A5 in = left trimpot
  * A4 in = right trimpot
@@ -26,31 +27,32 @@
  */
 
 const bool TEST_MODE = false;
+const bool TEST_MODE_RPM = true;
 
 const int ANALOG_READ_10V = 859;  // the ANALOG_READ value on pin A2 when the controller signal is 10V
-const int TRIMPOT_SENSITIVITY_MAX_VALUE = 20;  // the controller value (%) corresponding to the maximum value of the trimpot (1024 analog read, 10.0 on the dial)
+const int TRIMPOT_SENSITIVITY_MAX_VALUE = 10;  // the controller value (%) corresponding to the maximum value of the trimpot (1024 analog read, 10.0 on the dial)
 const int CONTROLLER_MAX_VALUE = 100; // maximum controller value
+
+enum class InputSource {ANALOG, RPM, DONT_KNOW};
+enum class RpmValidity {VALID, INVALID, DONT_KNOW};
 
 void setup() {
   // put your setup code here, to run once:
   //start serial connection
   Serial.begin(9600);
   rpmSensorSetup();
-  /*
 
-  
   //configure pin 4 as an input and enable the internal pull-up resistor
   pinMode(4, INPUT_PULLUP);
   pinMode(5, INPUT_PULLUP);
   pinMode(6, INPUT_PULLUP);
   pinMode(10, INPUT_PULLUP);
 
-  pinMode(2, OUTPUT);
   pinMode(3, OUTPUT);
   pinMode(7, OUTPUT);
   pinMode(9, OUTPUT);
+  pinMode(11, OUTPUT);
   pinMode(13, OUTPUT);
-  */
 }
 
 unsigned long lastSecondMillis;
@@ -62,9 +64,11 @@ float redLEDflashHz; // rate at which to flash the red LED
 unsigned long flashChangeMillis;  // time at which the last RED LED change in state occurred
 bool redLEDon;  // what state is the redLED?
 
+unsigned long lastControllerPrintMillis;
+
 void loop() {
-  testRpmSensorloop();
-  /*
+  if (TEST_MODE_RPM) testRpmSensorloop();
+
   bool buttonTriggerDose = (digitalRead(10) == LOW ? true : false);
   bool buttonAbortCooldown = (digitalRead(6) == LOW ? true : false);
   bool buttonRunPump = (digitalRead(4) == LOW ? true : false);
@@ -73,8 +77,22 @@ void loop() {
   int trimpotSensitivity = readTrimpot(A5);
   int trimpotRunDuration = readTrimpot(A4);
   int controllerSignal = readControllerSignal();
-
+  InputSource inputSource = whichInputSource(controllerSignal);
+  if (inputSource == InputSource::RPM) {
+    float rpm = readRPM();
+    if (rpm >= RPM_MIN_VALID && rpm <= RPM_MAX_VALID) {  // rescale RPM to mimic the analog read value
+      controllerSignal = static_cast<int>(ANALOG_READ_10V * rpm / (RPM_MAX_VALID - RPM_MIN_VALID));
+    } else {
+      inputSource = InputSource::DONT_KNOW;
+    }
+  } else if (inputSource == InputSource::DONT_KNOW) {
+    resetControllerTrainingPeriod();
+  }
   unsigned long timeNowMillis = millis();
+  if (TEST_MODE && timeNowMillis - lastControllerPrintMillis > 1000) {
+    lastControllerPrintMillis = timeNowMillis;
+    Serial.print(F("controllerSignal:")); Serial.println(controllerSignal);
+  }
 
   // check if cooldown has expired
   if (hasTriggeredCooldown) {
@@ -83,14 +101,16 @@ void loop() {
     if (buttonAbortCooldown || (timeNowMillis - triggerMillis >= cooldownDurationMillis)) {
       hasTriggeredCooldown = false;
     }
-
   }
 
   const float SLOWEST_FLASH_SPEED = 0.25; // Hz
   const float FASTEST_FLASH_SPEED = 10; // Hz
   const float NOT_READY_FLASH_SPEED = 0.5; //Hz
   double controllerDeviationThreshold = (double)TRIMPOT_SENSITIVITY_MAX_VALUE * (double)trimpotSensitivity / 1024;
-  double controllerDeviation = getFilteredControllerDeviation(timeNowMillis, controllerSignal);
+  double controllerDeviation = 0;
+  if (inputSource != InputSource::DONT_KNOW) {
+    controllerDeviation = getFilteredControllerDeviation(timeNowMillis, controllerSignal);
+  }
   bool autoControlReady = (controllerDeviation >=0);
 
   if (autoControlReady) {
@@ -100,8 +120,9 @@ void loop() {
   }
 //  Serial.print(Deviation); Serial.print(" "); Serial.print(controllerSignal); Serial.print(" "); Serial.println(controllerDeviationThreshold);
   if (buttonAutoMode) {
-    if (buttonTriggerDose || (autoControlReady && controllerDeviation >= controllerDeviationThreshold)) {
+    if (buttonTriggerDose || (autoControlReady && inputSource != InputSource::DONT_KNOW && controllerDeviation >= controllerDeviationThreshold)) {
       if (!hasTriggeredCooldown) {  
+        if (!hasTriggeredPump) Serial.println(F("Triggered"));
         hasTriggeredPump = true;
         hasTriggeredCooldown = (buttonAbortCooldown ? false : true);
         triggerMillis = timeNowMillis;
@@ -146,14 +167,12 @@ void loop() {
       flashChangeMillis = timeNowMillis - residualTime;
     }
   }
-  digitalWrite(2, redLEDon ? HIGH : LOW); // red LED
+  digitalWrite(11, redLEDon ? HIGH : LOW); // red LED
   if (autoControlReady) {
     digitalWrite(3, hasTriggeredCooldown ? HIGH : LOW); // yellow LED
   } else {
     digitalWrite(3, !redLEDon ? HIGH : LOW); // yellow LED    
   }
-
-      */
 }
 
 int readControllerSignal() {
@@ -216,6 +235,10 @@ unsigned long deglitchedSampleSum = 0;
 double filteredControllerDeviationLastValue;
 bool filteredControllerDeviationAvailable  = false;
 
+void resetControllerTrainingPeriod() {
+  firstSample = true;
+}
+
 //returns positive value for a deviation
 // if the deviation is less than zero (i.e. the controller output is increasing, not decreasing) then it returns 0
 // if no value is available yet, returns a negative value
@@ -235,6 +258,7 @@ double getFilteredControllerDeviation(unsigned long timeNowMillis, int currentRe
     filteredControllerDeviationAvailable = false;
     firstSample = false;
   }
+  
   if (timeNowMillis - lastDatapointMillis < SAMPLE_PERIOD_MILLIS) {
 //    if (sampleCount < GLITCH_BUFFER_SIZE) glitchRejectBuffer[sampleCount] = currentReading;
     ++sampleCount;
@@ -299,8 +323,97 @@ double getFilteredControllerDeviation(unsigned long timeNowMillis, int currentRe
     filteredControllerDeviationLastValue = baselineAverage - shortTermAverage;
     if (filteredControllerDeviationLastValue < 0) filteredControllerDeviationLastValue = 0;
     filteredControllerDeviationAvailable = (baselineBufferCount >= BASELINE_BUFFER_SIZE && shortBufferCount >= SHORT_BUFFER_SIZE);
-    Serial.print(" shortave:"); Serial.print(shortTermAverage); Serial.print(" baseline:"); Serial.print(baselineAverage);
-    Serial.print(" deviation:"); Serial.println(filteredControllerDeviationLastValue);
+//    Serial.print(" shortave:"); Serial.print(shortTermAverage); Serial.print(" baseline:"); Serial.print(baselineAverage);
+//    Serial.print(" deviation:"); Serial.println(filteredControllerDeviationLastValue);
   }
   return (filteredControllerDeviationAvailable ? filteredControllerDeviationLastValue : -1);
+}
+
+/*
+ * The two input sources are:
+ * 1) When the plug from the 20L fermenter is plugged in, plug pin 10 = Digital Input 2 is open -> pulled high by intl pullup, and a voltage is applied to plug pins 4(+) & 17 (gnd) = Analog2 in
+ * 2) When the plug from the rpm sensor is plugged in, plug pin 10 = Digital Input 2 is open or pulled low (pin10), and plug pin 4 is tied to gnd via 1K --> Analog2 in
+ * 
+ * The input source mode changes if:
+ * 1) If currently is DONT_KNOW, and the rpm sensor is returning valid readings for at least 10 seconds: swap to RPM and trigger relearning phase
+ * 2) If currently is DONT_KNOW, and the rpm sensor does not return a valid reading for at least 10 seconds, swap to ANALOG and trigger relearning phase
+ * 3) If currently is ANALOG, and the analog reading is less than threshold, and rpm sensor is returning valid readings for at least 10 seconds: swap to RPM and trigger relearning phase
+ * 4) If currently is RPM, and the rpm sensor does not return valid readings for at least 10 seconds, swap to ANALOG and trigger relearning phase
+ */
+
+InputSource inputSource = InputSource::DONT_KNOW;
+
+const int THRESHOLD_CONTROLLER_SIGNAL = ANALOG_READ_10V / 20;
+const float THRESHOLD_RPM_VALUE = RPM_MIN_VALID / 2;
+const int INPUTSOURCE_CHANGEOVER_DELAY_MILLIS = 10 * 1000; //10 seconds
+unsigned long lastInvalidRPMMillis = 0;   // time since last invalid rpm reading, clamped to INPUTSOURCE_CHANGEOVER_DELAY_MILLIS;
+unsigned long lastValidRPMMillis = 0;   // time since last valid rpm reading, clamped to INPUTSOURCE_CHANGEOVER_DELAY_MILLIS;
+unsigned long lastAnalogAboveThresholdMillis = 0;  // time since last reading below threshold, clamped to INPUTSOURCE_CHANGEOVER_DELAY_MILLIS;
+bool firstRPMinvalid = true;
+bool firstRPMvalid = true;
+
+InputSource whichInputSource(int controllerSignal) {
+    unsigned long currentMillis = millis();
+    RpmValidity rpmValidity = RpmValidity::DONT_KNOW;
+    float rpm = readRPM();
+    if (rpm < THRESHOLD_RPM_VALUE) {
+      lastInvalidRPMMillis = currentMillis;
+      if (currentMillis - lastValidRPMMillis > INPUTSOURCE_CHANGEOVER_DELAY_MILLIS) {
+        if (TEST_MODE_RPM && firstRPMinvalid) Serial.println(F("RPM invalid"));
+        firstRPMinvalid = false;
+        rpmValidity = RpmValidity::INVALID;
+        lastValidRPMMillis = currentMillis - INPUTSOURCE_CHANGEOVER_DELAY_MILLIS;
+      }
+      firstRPMvalid = true;
+    } else {
+      lastValidRPMMillis = currentMillis;
+      if (currentMillis - lastInvalidRPMMillis > INPUTSOURCE_CHANGEOVER_DELAY_MILLIS) {
+        if (TEST_MODE_RPM && firstRPMvalid) Serial.println(F("RPM valid"));
+        firstRPMvalid = false;
+        rpmValidity = RpmValidity::VALID;
+        lastInvalidRPMMillis = currentMillis - INPUTSOURCE_CHANGEOVER_DELAY_MILLIS;
+      }
+      firstRPMinvalid = true;
+    }
+
+    bool analogAboveThreshold = false;
+    if (controllerSignal < THRESHOLD_CONTROLLER_SIGNAL) {
+      lastAnalogAboveThresholdMillis = currentMillis;
+    } else {
+      if (currentMillis - lastAnalogAboveThresholdMillis > INPUTSOURCE_CHANGEOVER_DELAY_MILLIS) {
+        analogAboveThreshold = true;
+        lastAnalogAboveThresholdMillis = currentMillis - INPUTSOURCE_CHANGEOVER_DELAY_MILLIS;
+      }
+    }
+  
+    switch(inputSource) {
+      case InputSource::DONT_KNOW: {
+        if (rpmValidity == RpmValidity::VALID) {
+          inputSource = InputSource::RPM;
+          resetControllerTrainingPeriod();
+        } else {
+          if (rpmValidity == RpmValidity::INVALID) {
+           inputSource = InputSource::ANALOG;
+           resetControllerTrainingPeriod();           
+          }
+        }
+        break;
+      }
+      case InputSource::ANALOG: {
+         if (!analogAboveThreshold && rpmValidity == RpmValidity::VALID) {
+          inputSource = InputSource::RPM;
+          resetControllerTrainingPeriod();
+         }
+        break;
+      }
+      case InputSource::RPM: {
+         if (rpmValidity == RpmValidity::INVALID) {
+          inputSource = InputSource::ANALOG;
+          resetControllerTrainingPeriod();
+         }
+        break;
+      }
+      default: return InputSource::DONT_KNOW;
+    }
+  return inputSource; 
 }

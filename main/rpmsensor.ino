@@ -25,19 +25,22 @@ void rpmSensorSetup() {
   lastPrintoutTimeMillis = millis();
 }
 
-const bool ECHO_EVERY_RPM_MEASUREMENT = true;
+const bool ECHO_EVERY_RPM_MEASUREMENT = false;
 
-const int HISTOGRAM_TABLE_ENTRIES_COUNT = 600;
+const int HISTOGRAM_TABLE_SMALLEST_ENTRY = (RPM_MIN_VALID/2);
+const int HISTOGRAM_TABLE_ENTRIES_COUNT = (RPM_MAX_VALID/2) - (RPM_MIN_VALID/2) + 1;
 const unsigned short HISTOGRAM_MAX_COUNT = 30000;
-unsigned short histogram[HISTOGRAM_TABLE_ENTRIES_COUNT];
+unsigned short histogram[HISTOGRAM_TABLE_ENTRIES_COUNT];  // each table entry covers two rpm eg 360 and 361 map to the same cell
 unsigned short histogramInvalidCount;
 unsigned short histogramSampleCount;
 
 void testRpmSensorloop() {
+  static byte lastCriticalSectionCounter;
   byte rpmcounter = criticalSectionCounter;
 
-  while (criticalSectionCounter == rpmcounter); // wait
-
+  if (rpmcounter == lastCriticalSectionCounter) return; // no updated value yet
+  lastCriticalSectionCounter = rpmcounter;
+  
   float rpm = readRPM();
   if (ECHO_EVERY_RPM_MEASUREMENT) Serial.println(rpm);
   bool isFull = addValueToHistogram(rpm);
@@ -58,6 +61,10 @@ bool addValueToHistogram(float value) {
   }
 
   int rpmInt = (int)value;
+  if (rpmInt < RPM_MIN_VALID) rpmInt = RPM_MIN_VALID;
+  if (rpmInt > RPM_MAX_VALID) rpmInt = RPM_MAX_VALID;
+  rpmInt -= RPM_MIN_VALID;
+  rpmInt /= 2;
   if (rpmInt >= HISTOGRAM_TABLE_ENTRIES_COUNT) rpmInt = HISTOGRAM_TABLE_ENTRIES_COUNT - 1;
   if (histogram[rpmInt] >= HISTOGRAM_MAX_COUNT) return true;
   ++histogram[rpmInt];
@@ -71,21 +78,21 @@ void histogramClear() {
 }
 
 void printHistogram() {
-  Serial.print("Total samples:");
+  Serial.print(F("Total samples:"));
   Serial.println(histogramSampleCount);
 
-  Serial.print("Invalid samples:");
+  Serial.print(F("Invalid samples:"));
   Serial.println(histogramInvalidCount);
   int column = 0;
   int i = 0;
   do {
     if (column == 0) {
-      Serial.print(i);
+      Serial.print(i*2 + RPM_MIN_VALID);
       Serial.print(":");
     }
     Serial.print(histogram[i]);
     Serial.print(" ");
-    if (++column == 10) {
+    if (++column == 5) {
       column = 0;
       Serial.println();
     }
@@ -102,8 +109,6 @@ void onDetectInterrupt()
 }
 
 const unsigned long MICROSECONDS_PER_MINUTE = 1000000UL * 60;
-const unsigned long RPM_MIN_VALID = 30;
-const unsigned long RPM_MAX_VALID = 600;
 
 const unsigned long RPM_MAX_ELAPSED_TIME_MICROSECONDS = MICROSECONDS_PER_MINUTE / RPM_MIN_VALID;
 const unsigned long RPM_MIN_ELAPSED_TIME_MICROSECONDS = MICROSECONDS_PER_MINUTE / RPM_MAX_VALID;
@@ -115,8 +120,8 @@ const unsigned long RPM_MIN_ELAPSED_TIME_MICROSECONDS = MICROSECONDS_PER_MINUTE 
 // 4) check if the reading is stale (compare mostrecentTriggerTime to micros())
 
 // get the current RPM reading, returns:
-//    zero if no valid reading (the most recent signal from the sensor is more than RPM_TIMEOUT_MICROSECONDS microseconds ago)
-//    negative if no valid reading (the elapsed time between triggers is infeasibly fast)
+//    zero if no valid reading - too slow (the most recent signal from the sensor is more than RPM_TIMEOUT_MICROSECONDS microseconds ago)
+//    negative if no valid reading - too fast (the elapsed time between triggers is infeasibly fast)
 float readRPM() {
   byte cscStart;
   unsigned long previous;
@@ -133,5 +138,6 @@ float readRPM() {
   if (micros() - current >= RPM_MAX_ELAPSED_TIME_MICROSECONDS) return 0.0; // value is stale
   unsigned long elapsedTime = current - previous;
   if (elapsedTime < RPM_MIN_ELAPSED_TIME_MICROSECONDS) return -1.0; // value is infeasibly fast
+  if (elapsedTime > RPM_MAX_ELAPSED_TIME_MICROSECONDS) return 0.0; // value is too slow (below minimum)
   return ((float)MICROSECONDS_PER_MINUTE / elapsedTime);
 }

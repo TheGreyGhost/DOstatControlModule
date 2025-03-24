@@ -39,4 +39,7 @@ float readRPM();
 // test function for the rpm sensor.  Call in a loop to collect sensor readings and present as histogram.
 void testRpmSensorloop();
 
+const unsigned long RPM_MIN_VALID = 40;
+const unsigned long RPM_MAX_VALID = 480;
+
 #endif
